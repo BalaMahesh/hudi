@@ -35,6 +35,7 @@ import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.SparkSession;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -89,7 +90,7 @@ public class JsonPubSubSource extends JsonSource {
     }else {
       List<ReceivedMessage> receivedMessages = pullResponse.getReceivedMessagesList();
       for (ReceivedMessage message : receivedMessages) {
-        messages.add(message.getMessage().getData().toString());
+        messages.add(message.getMessage().getData().toStringUtf8());
         ackIds.add(message.getAckId());
       }
       Collections.sort(ackIds);
