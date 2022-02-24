@@ -225,6 +225,7 @@
           </dependency>
         </dependencies>
         <configuration>
+          <skip>true</skip>
           <consoleOutput>true</consoleOutput>
           <encoding>UTF-8</encoding>
           <configLocation>style/checkstyle.xml</configLocation>
