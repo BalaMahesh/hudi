@@ -50,6 +50,7 @@ public class JsonPubSubSource extends JsonSource {
   List<String> ackIds = new ArrayList<>();
   private SparkSession sparkSession;
   private final HoodieDeltaStreamerMetrics metrics;
+  private String completeSubscription;
 
   public JsonPubSubSource(TypedProperties cfg, JavaSparkContext jssc,
                           SparkSession sparkSession, SchemaProvider schemaProvider,
@@ -58,6 +59,7 @@ public class JsonPubSubSource extends JsonSource {
     this.metrics = metrics;
     this.subscriptionId = props.getString("hoodie.deltastreamer.source.pubsub.subscriptionId");
     String projectId = props.getString("hoodie.deltastreamer.source.pubsub.projectId");
+    this.completeSubscription = String.format("projects/%s/subscriptions/%s",projectId,subscriptionId);
     int numOfMessages = 1000;
     this.sparkSession = sparkSession;
     try {
@@ -107,12 +109,13 @@ public class JsonPubSubSource extends JsonSource {
         if (lastCkptStr.equalsIgnoreCase(ackIds.get(0) + "-" + ackIds.get(ackIds.size() - 1))) {
           AcknowledgeRequest acknowledgeRequest =
               AcknowledgeRequest.newBuilder()
-                  .setSubscription(subscriptionId)
+                  .setSubscription(completeSubscription)
                   .addAllAckIds(ackIds)
                   .build();
 
           // Use acknowledgeCallable().futureCall to asynchronously perform this operation.
           subscriber.acknowledgeCallable().call(acknowledgeRequest);
+          LOG.debug("Acknowledged "+ ackIds.size() +" messages");
         }
       }
     } catch (Exception e){
