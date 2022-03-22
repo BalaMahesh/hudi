@@ -19,49 +19,66 @@
 
 package org.apache.hudi.utilities.sources;
 
-import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
-import com.google.cloud.pubsub.v1.stub.SubscriberStub;
-import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
-import com.google.pubsub.v1.*;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.utilities.deltastreamer.HoodieDeltaStreamerMetrics;
 import org.apache.hudi.utilities.schema.SchemaProvider;
+
+
+import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
+import com.google.cloud.pubsub.v1.stub.SubscriberStub;
+import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
+import com.google.pubsub.v1.AcknowledgeRequest;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.storage.StorageLevel;
+import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaDStream;
+import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import org.apache.spark.streaming.dstream.ReceiverInputDStream;
+import org.apache.spark.streaming.pubsub.PubsubUtils;
+import org.apache.spark.streaming.pubsub.SparkGCPCredentials;
+import org.apache.spark.streaming.pubsub.SparkGCPCredentials$;
+import org.apache.spark.streaming.pubsub.SparkPubsubMessage;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
-public class JsonPubSubSource extends JsonSource {
+import scala.Option$;
+import scala.reflect.ClassTag$;
 
-  private static final Logger LOG = LogManager.getLogger(JsonPubSubSource.class);
+public class JsonPubSubSource extends JsonSource{
 
-  private SubscriberStub subscriber;
-  private PullRequest pullRequest;
+  private JavaSparkContext sparkContext;
+  private JavaStreamingContext jssc;
   private String subscriptionId = "";
+  private String projectId = "";
   List<String> ackIds = new ArrayList<>();
-  private SparkSession sparkSession;
-  private final HoodieDeltaStreamerMetrics metrics;
-  private String completeSubscription;
+  private String fullSubscription;
+  private SparkGCPCredentials sparkGCPCredentials;
+  private SubscriberStub subscriber;
+  private JavaReceiverInputDStream<SparkPubsubMessage> messages;
 
-  public JsonPubSubSource(TypedProperties cfg, JavaSparkContext jssc,
-                          SparkSession sparkSession, SchemaProvider schemaProvider,
-                          HoodieDeltaStreamerMetrics metrics) {
-    super(cfg, jssc , sparkSession, schemaProvider);
-    this.metrics = metrics;
+
+
+  private static final Logger LOG = LogManager.getLogger(JsonPubSubPullSource.class);
+
+
+  public JsonPubSubSource(TypedProperties props, JavaSparkContext sparkContext, SparkSession sparkSession,
+                            SchemaProvider schemaProvider, HoodieDeltaStreamerMetrics metrics) {
+    super(props, sparkContext, sparkSession, schemaProvider);
+    this.sparkContext = sparkContext;
     this.subscriptionId = props.getString("hoodie.deltastreamer.source.pubsub.subscriptionId");
-    String projectId = props.getString("hoodie.deltastreamer.source.pubsub.projectId");
-    this.completeSubscription = String.format("projects/%s/subscriptions/%s",projectId,subscriptionId);
-    int numOfMessages = 1000;
-    this.sparkSession = sparkSession;
+    projectId = props.getString("hoodie.deltastreamer.source.pubsub.projectId");
+    String credentialFile =  props.getString("hoodie.deltastreamer.source.pubsub.auth.credentials");
+    this.fullSubscription = String.format("projects/%s/subscriptions/%s",projectId,subscriptionId);
+    this.sparkGCPCredentials = SparkGCPCredentials$.MODULE$.builder().jsonServiceAccount(credentialFile).build();
     try {
       SubscriberStubSettings subscriberStubSettings =
           SubscriberStubSettings.newBuilder()
@@ -70,36 +87,25 @@ public class JsonPubSubSource extends JsonSource {
                       .setMaxInboundMessageSize(20 * 1024 * 1024) // 20MB (maximum message size).
                       .build()).build();
       this.subscriber = GrpcSubscriberStub.create(subscriberStubSettings);
-      String subscriptionName = ProjectSubscriptionName.format(projectId, subscriptionId);
-      this.pullRequest =
-          PullRequest.newBuilder()
-              .setMaxMessages(numOfMessages)
-              .setSubscription(subscriptionName)
-              .build();
-    } catch (IOException e) {
-      LOG.error("Error building subscriber :: {}",e);
+    }catch (IOException e){
+      LOG.error("Error building Pub Sub subscriber :: {}",e);
     }
-
+    this.jssc = new JavaStreamingContext(sparkContext, Durations.seconds(60));
+    messages = PubsubUtils.createStream(jssc,projectId,subscriptionId,sparkGCPCredentials,StorageLevel.MEMORY_AND_DISK(),false);
+    this.jssc.start();
   }
 
   @Override
   protected InputBatch<JavaRDD<String>> fetchNewData(Option<String> lastCkptStr, long sourceLimit) {
-    PullResponse pullResponse = subscriber.pullCallable().call(pullRequest);
-    List<String> messages = new ArrayList<>();
     String checkPointStr = "no-messages";
-    if (pullResponse.getReceivedMessagesList().isEmpty()) {
-      LOG.warn("Receiving no messages from :: "+ this.subscriptionId);
-    }else {
-      List<ReceivedMessage> receivedMessages = pullResponse.getReceivedMessagesList();
-      for (ReceivedMessage message : receivedMessages) {
-        messages.add(message.getMessage().getData().toStringUtf8());
-        ackIds.add(message.getAckId());
-      }
-      Collections.sort(ackIds);
-      checkPointStr = ackIds.get(0)+"-"+ackIds.get(ackIds.size()-1);
-    }
-    JavaRDD<String> newDataRDD = sparkSession.createDataset(messages, Encoders.STRING()).toJavaRDD();
-    return new InputBatch<>(Option.of(newDataRDD), checkPointStr);
+    JavaRDD<SparkPubsubMessage> messageRdd = sparkContext.emptyRDD();
+    messages.foreachRDD(messageRdd::union);
+    JavaRDD<String> inputMessages = messageRdd.map(message-> {
+      return new String(message.getData(), StandardCharsets.UTF_8);
+    });
+    LOG.info("Received :: " + ackIds.size() + "messages from subscription :: " + this.subscriptionId);
+    ackIds = messageRdd.map(SparkPubsubMessage::getAckId).collect();
+    return new InputBatch<>(Option.of(inputMessages), checkPointStr);
   }
 
   @Override
@@ -109,14 +115,16 @@ public class JsonPubSubSource extends JsonSource {
         if (lastCkptStr.equalsIgnoreCase(ackIds.get(0) + "-" + ackIds.get(ackIds.size() - 1))) {
           AcknowledgeRequest acknowledgeRequest =
               AcknowledgeRequest.newBuilder()
-                  .setSubscription(completeSubscription)
+                  .setSubscription(fullSubscription)
                   .addAllAckIds(ackIds)
                   .build();
 
           // Use acknowledgeCallable().futureCall to asynchronously perform this operation.
           subscriber.acknowledgeCallable().call(acknowledgeRequest);
-          LOG.debug("Acknowledged "+ ackIds.size() +" messages");
+          LOG.info("Acknowledged "+ ackIds.size() +" messages");
         }
+      }else {
+        LOG.info("No messages to acknowledge on subscription ::"+ this.subscriptionId);
       }
     } catch (Exception e){
       LOG.error("Error while sending ack to pub sub queue :: {}",e.getCause());

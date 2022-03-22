@@ -20,7 +20,7 @@
 package org.apache.hudi.utilities.sources;
 
 import org.apache.avro.generic.GenericRecord;
-import org.apache.hudi.AvroConversionUtils;
+
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.Option;
@@ -28,19 +28,15 @@ import org.apache.hudi.testutils.SparkClientFunctionalTestHarness;
 import org.apache.hudi.utilities.deltastreamer.HoodieDeltaStreamerMetrics;
 import org.apache.hudi.utilities.deltastreamer.SourceFormatAdapter;
 import org.apache.hudi.utilities.schema.FilebasedSchemaProvider;
-import org.apache.hudi.utilities.sources.helpers.KafkaOffsetGen;
+
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URL;
 import java.util.Objects;
-import java.util.UUID;
 
-import static org.apache.hudi.utilities.testutils.UtilitiesTestBase.Helpers.jsonifyRecords;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 
@@ -78,7 +74,7 @@ public class TestJsonPubSubSource extends SparkClientFunctionalTestHarness {
     HoodieTestDataGenerator dataGenerator = new HoodieTestDataGenerator();
     TypedProperties props = createPropsForJsonSource(projectId, subscriptionId,null, "earliest");
 
-    Source jsonSource = new JsonPubSubSource(props, jsc(), spark(), schemaProvider, metrics);
+    Source jsonSource = new JsonPubSubPullSource(props, jsc(), spark(), schemaProvider, metrics);
     SourceFormatAdapter pubSubSource = new SourceFormatAdapter(jsonSource);
 
     InputBatch<JavaRDD<GenericRecord>> fetch1 = pubSubSource.fetchNewDataInAvroFormat(Option.empty(), 300);

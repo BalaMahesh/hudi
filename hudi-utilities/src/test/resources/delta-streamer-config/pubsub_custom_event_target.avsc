@@ -30,6 +30,10 @@
       "type": "string"
     },
     {
+      "name": "try",
+      "type": "int"
+    },
+    {
       "name": "date",
       "type": "string"
     },
