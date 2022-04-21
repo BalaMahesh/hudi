@@ -153,6 +153,15 @@
                   <include>org.apache.curator:curator-client</include>
                   <include>org.apache.curator:curator-recipes</include>
                   <include>commons-codec:commons-codec</include>
+
+                  <!-- PubSub Client -->
+                  <include>com.google.cloud:google-cloud-pubsub</include>
+                  <include>com.google.protobuf:protobuf-java</include>
+                  <include>com.google.guava:guava</include>
+                  <include>com.google.api:gax-grpc</include>
+                  <include>com.google.api:gax</include>
+                  <include>com.inmobi.glance:glance-datatypes</include>
+
                 </includes>
               </artifactSet>
               <relocations>
