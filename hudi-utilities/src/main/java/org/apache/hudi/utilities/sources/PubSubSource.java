@@ -30,6 +30,8 @@ import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.pubsub.v1.stub.GrpcSubscriberStub;
 import com.google.cloud.pubsub.v1.stub.SubscriberStub;
 import com.google.cloud.pubsub.v1.stub.SubscriberStubSettings;
+import com.google.common.collect.Lists;
+import com.google.protobuf.Empty;
 import com.google.pubsub.v1.AcknowledgeRequest;
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.PullRequest;
@@ -41,11 +43,11 @@ import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.SparkSession;
 
 import java.io.FileInputStream;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 public abstract class PubSubSource extends JsonSource{
 
@@ -56,7 +58,9 @@ public abstract class PubSubSource extends JsonSource{
   protected SparkSession sparkSession;
   protected final HoodieDeltaStreamerMetrics metrics;
   protected String fullSubscription;
-  private int numberOfPullRequests = 1;
+  protected int numberOfPullRequests = 1;
+  protected String projectId = "";
+  protected String credentialPath = "";
 
   private static final Logger LOG = LogManager.getLogger(PubSubSource.class);
 
@@ -64,31 +68,30 @@ public abstract class PubSubSource extends JsonSource{
                       SchemaProvider schemaProvider,HoodieDeltaStreamerMetrics metrics) {
     super(props, sparkContext, sparkSession, schemaProvider);
     this.metrics = metrics;
+    try {
     this.subscriptionId = props.getString("hoodie.deltastreamer.source.pubsub.subscriptionId");
-    String projectId = props.getString("hoodie.deltastreamer.source.pubsub.projectId");
-    this.fullSubscription = String.format("projects/%s/subscriptions/%s",projectId,subscriptionId);
-    String credentialsPath = props.getString("hoodie.deltastreamer.source.pubsub.auth.credentials");
+    this.projectId = props.getString("hoodie.deltastreamer.source.pubsub.projectId");
+    this.credentialPath = props.getString("hoodie.deltastreamer.source.pubsub.auth.credentials");
     numberOfPullRequests = Integer.parseInt(props.containsKey("hoodie.deltastreamer.source.pubsub.max.pullRequests") ?
         props.getString("hoodie.deltastreamer.source.pubsub.max.pullRequests") : "1");
 
     int numOfMessages = 1000;
     this.sparkSession = sparkSession;
-    try {
       SubscriberStubSettings subscriberStubSettings =
           SubscriberStubSettings.newBuilder()
               .setTransportChannelProvider(
                   SubscriberStubSettings.defaultGrpcTransportProviderBuilder()
                       .setMaxInboundMessageSize(20 * 1024 * 1024) // 20MB (maximum message size).
-                      .build()).setCredentialsProvider(FixedCredentialsProvider.create(GoogleCredentials.fromStream(new FileInputStream(credentialsPath)))).build();
+                      .build()).setCredentialsProvider(FixedCredentialsProvider.create(GoogleCredentials.fromStream(new FileInputStream(credentialPath)))).build();
       this.subscriber = GrpcSubscriberStub.create(subscriberStubSettings);
-      String subscriptionName = ProjectSubscriptionName.format(projectId, subscriptionId);
+      this.fullSubscription = ProjectSubscriptionName.format(projectId, subscriptionId);
       this.pullRequest =
           PullRequest.newBuilder()
               .setMaxMessages(numOfMessages)
-              .setSubscription(subscriptionName)
+              .setSubscription(fullSubscription)
               .build();
-    } catch (IOException e) {
-      LOG.error("Error building subscriber :: {}",e);
+    } catch (Exception e) {
+      LOG.error("Error Creating PullSource :: {}",e);
     }
 
   }
@@ -106,7 +109,7 @@ public abstract class PubSubSource extends JsonSource{
       try {
         PullResponse response = f.get();
         receivedMessages.addAll(response.getReceivedMessagesList());
-        LOG.info("Received :: "+response.getReceivedMessagesCount() +" messages from pull");
+        LOG.debug("Received :: "+response.getReceivedMessagesCount() +" messages from pull");
       } catch (InterruptedException | ExecutionException e) {
         LOG.error("Error while fetching records :: {}",e);
       }
@@ -124,24 +127,33 @@ public abstract class PubSubSource extends JsonSource{
   public void onCommit(String lastCkptStr) {
     try {
       if (ackIds.size() > 0) {
-        if (lastCkptStr.equalsIgnoreCase(ackIds.get(0) + "-" + ackIds.get(ackIds.size() - 1))) {
+        List<ApiFuture<Empty>> futures = new ArrayList<>();
+        List<List<String>> ackIdChunks = Lists.partition(ackIds, 2000);
+        LOG.info("About to acknowledge:: " + ackIds.size() + " messages in :: " + ackIdChunks.size() + " requests");
+        ackIdChunks.forEach(ackIdChunk -> {
           AcknowledgeRequest acknowledgeRequest =
               AcknowledgeRequest.newBuilder()
                   .setSubscription(fullSubscription)
-                  .addAllAckIds(ackIds)
+                  .addAllAckIds(ackIdChunk)
                   .build();
-
-          // Use acknowledgeCallable().futureCall to asynchronously perform this operation.
-          subscriber.acknowledgeCallable().call(acknowledgeRequest);
-          LOG.info("Acknowledged " + ackIds.size() + " messages");
-        }else{
-          LOG.warn("Acknowledgement Ids not matching for the batch of :: "+ackIds.size() + " messages. No acknowledgement happening");
+          futures.add(subscriber.acknowledgeCallable().futureCall(acknowledgeRequest));
+        });
+        for (ApiFuture<Empty> future : futures) {
+          try {
+            if (!future.get(10, TimeUnit.SECONDS).isInitialized()) {
+              LOG.error("Acknowledge request failed for one future, messages can get processed again");
+            }
+          } catch (Exception e) {
+            LOG.error("Acknowledge request error", e);
+          }
         }
+        LOG.info("Acknowledged :: " + ackIds.size());
+      } else {
+        LOG.info("No ackIds to acknowledge the data");
       }
-    } catch (Exception e) {
-      LOG.error("Error while sending ack to pub sub queue :: {}", e.getCause());
-      LOG.warn("The above error can result in the duplicate data");
-    } finally {
+    }catch (Exception e){
+      LOG.error("Error while acknowledging data:: {}",e);
+    }finally {
       ackIds.clear();
     }
   }

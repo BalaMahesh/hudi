@@ -25,7 +25,7 @@ import org.apache.hudi.utilities.deltastreamer.HoodieDeltaStreamerMetrics;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 
 import com.google.protobuf.Any;
-import com.google.pubsub.v1.PullResponse;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.pubsub.v1.ReceivedMessage;
 import com.inmobi.glance.datatypes.analytics.GlancePublisherMessage;
 import org.apache.log4j.LogManager;
@@ -36,40 +36,45 @@ import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.SparkSession;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 public class ProtoPubSubPullSource extends PubSubSource{
 
   private static final Logger LOG = LogManager.getLogger(ProtoPubSubPullSource.class);
 
+  private Integer partitions = 8;
+
   public ProtoPubSubPullSource(TypedProperties props, JavaSparkContext sparkContext, SparkSession sparkSession,
                                SchemaProvider schemaProvider, HoodieDeltaStreamerMetrics metrics) {
     super(props, sparkContext, sparkSession, schemaProvider, metrics);
+    partitions = Integer.parseInt(props.containsKey("hoodie.deltastreamer.source.pubsub.rdd.partitions") ?
+        props.getString("hoodie.deltastreamer.source.pubsub.rdd.partitions") : "8");
+    LOG.info("Created the pub sub source with rdd partitions:: "+partitions);
   }
 
   @Override
   protected InputBatch<JavaRDD<String>> fetchNewData(Option<String> lastCkptStr, long sourceLimit) {
-      List<String> messages = new ArrayList<>();
-      List<ReceivedMessage> receivedMessages = fetchNewMessages(lastCkptStr,sourceLimit);
-      for (ReceivedMessage message : receivedMessages) {
-        GlancePublisherMessage glancePublisherMessage = null;
-        try {
-          glancePublisherMessage = Any.parseFrom(message.getMessage().getData()).unpack(GlancePublisherMessage.class);
-          messages.add(glancePublisherMessage.getData());
-          ackIds.add(message.getAckId());
-        } catch (Exception e) {
-          LOG.error("Error while parsing proto buffer :: {}",e);
-        }
+    List<String> messages = new ArrayList<>();
+    List<ReceivedMessage> receivedMessages = fetchNewMessages(lastCkptStr,sourceLimit);
+    receivedMessages.forEach(receivedMessage -> {
+      try {
+        messages.add(Any.parseFrom(receivedMessage.getMessage().getData()).unpack(GlancePublisherMessage.class).getData());
+      } catch (InvalidProtocolBufferException e) {
+        LOG.error("Error parsing message from proto message:: {}",e);
       }
-      String checkPointStr = ackIds.size() > 0 ? ackIds.get(0)+"-"+ackIds.get(ackIds.size()-1) : "no-messages" ;
-      JavaRDD<String> newDataRDD = sparkSession.createDataset(messages, Encoders.STRING()).toJavaRDD();
-      return new InputBatch<>(Option.of(newDataRDD), checkPointStr);
+      ackIds.add(receivedMessage.getAckId());
+    });
+    LOG.info("Received messages list size :: "+messages.size());
+    String checkPointStr = ackIds.size() > 0 ? ackIds.get(0)+"-"+ackIds.get(ackIds.size()-1) : "no-messages" ;
+    JavaRDD<String> newDataRDD = sparkContext.parallelize(messages,partitions);
+    return new InputBatch<>(Option.of(newDataRDD), checkPointStr);
+
   }
 
   @Override
   public void onCommit(String lastCkptStr) {
-    super.onCommit(lastCkptStr);
+   super.onCommit(lastCkptStr);
+
   }
 
 }

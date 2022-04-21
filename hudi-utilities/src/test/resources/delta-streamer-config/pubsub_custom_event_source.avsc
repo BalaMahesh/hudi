@@ -23,23 +23,25 @@
   "fields": [
     {
       "name": "id",
-      "type": "int"
+      "type": ["null", "int"]
     },
     {
       "name": "name",
-      "type": "string"
+      "type": ["null", "string"]
+
     },
     {
       "name": "try",
-      "type": "int"
+      "type": ["null", "int"]
+
     },
     {
       "name": "date",
-      "type": "string"
+      "type": ["null", "string"]
     },
     {
       "name": "timestamp",
-      "type": "long"
+      "type": ["null","long"]
     }
   ]
 }

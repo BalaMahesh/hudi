@@ -27,6 +27,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
 
 import java.text.SimpleDateFormat;
 
@@ -38,7 +39,7 @@ public class AddDateHourColumnTransformer implements Transformer{
 
   @Override
   public Dataset<Row> apply(JavaSparkContext jsc, SparkSession sparkSession, Dataset<Row> rowDataset, TypedProperties properties) {
-    DateTime now = DateTime.now();
+    DateTime now = DateTime.now(DateTimeZone.UTC);
     Dataset<Row> transformed = rowDataset.withColumn("process_date",functions.lit(format.format(now.toDate()))).
                                           withColumn("hour",functions.lit(format("%02d",now.getHourOfDay())));
 
